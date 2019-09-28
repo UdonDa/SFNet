@@ -2,11 +2,16 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import os
+import cv2
 import random
+import imutils
 from custom_dataset import PF_Pascal
 from model import SFNet
 #import matplotlib.pyplot as plt
 import argparse
+from PIL import Image
+
+name = "test"
 
 parser = argparse.ArgumentParser(description="SFNet evaluation")
 parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loader')
@@ -17,10 +22,13 @@ parser.add_argument('--test_image_path', type=str, default='./data/PF_Pascal/', 
 parser.add_argument('--beta', type=float, default=50, help='inverse temperature of softmax @ kernel soft argmax')
 parser.add_argument('--kernel_sigma', type=float, default=5, help='standard deviation of Gaussian kerenl @ kernel soft argmax')
 parser.add_argument('--eval_type', type=str, default='bounding_box', choices=('bounding_box','image_size'), help='evaluation type for PCK threshold (bounding box | image size)')
+parser.add_argument('--result_dir', type=str, default=f'./results/{name}')
 args = parser.parse_args()
 
-# os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
+save_img_dir = os.path.join(args.result_dir, "images")
+os.makedirs(save_img_dir, exist_ok=True)
 
 # Data Loader
 print("Instantiate dataloader")
@@ -33,12 +41,12 @@ test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
 # Instantiate model
 print("Instantiate model")
 net = SFNet(args.feature_h, args.feature_w, beta=args.beta, kernel_sigma = args.kernel_sigma)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net.to(device)
 
 # Load weights
 print("Load pre-trained weights")
-best_weights = torch.load("./weights/best_checkpoint.pt")
+best_weights = torch.load(f"results/{name}/weights/best_checkpoint.pt")
 adap3_dict = best_weights['state_dict1']
 adap4_dict = best_weights['state_dict2']
 net.adap_layer_feat3.load_state_dict(adap3_dict, strict=False)
@@ -103,6 +111,29 @@ with torch.no_grad():
             est_image1_points[:,j] = [est_x,est_y]
 
         total_correct_points += correct_keypoints(batch['image1_points'], torch.FloatTensor(est_image1_points).unsqueeze(0), batch['L_pck'], alpha=0.1)
+
+
+        src_image = src_image[0].data.cpu().numpy()
+        tgt_image = tgt_image[0].data.cpu().numpy()
+        GT_src_mask = F.interpolate(GT_src_mask, scale_factor=16, mode='bilinear', align_corners=False)
+        GT_src_mask = GT_src_mask.data.cpu().numpy()
+        GT_tgt_mask = F.interpolate(GT_tgt_mask, scale_factor=16, mode='bilinear', align_corners=False)
+        GT_tgt_mask = GT_tgt_mask.data.cpu().numpy()
+
+
+        for key in output:
+            if (not key == "grid_T2S") or (not key == "grid_S2T"):
+                print(f"{key}: {output[key].size()}")
+                output[key] = F.interpolate(output[key], scale_factor=16, mode='bilinear', align_corners=False).data.cpu().numpy()
+            else:
+                del output[key]
+        imutils.save_semantic_image(src_image[0], GT_src_mask[0][0], filename="tmp/input_src.png")
+        imutils.save_semantic_image(tgt_image[0], GT_tgt_mask[0][0], filename="tmp/input_tgt.png")
+        imutils.save_semantic_image(src_image[0], output["est_src_mask"][0][0], filename="tmp/est_src_mask.png")
+        imutils.save_semantic_image(src_image[0], output["est_tgt_mask"][0][0], filename="tmp/est_tgt_mask.png")
+        imutils.save_semantic_image(src_image[0], output["est_tgt_mask"][0][0], filename="tmp/est_tgt_mask.png")
+        exit()
+
     PCK = total_correct_points / len(test_dataset)
     print('PCK: %5f' % PCK)
                 

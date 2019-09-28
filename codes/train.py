@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import cv2
+import imutils
 from PIL import Image
 import random
 from torchvision.utils import save_image
@@ -119,42 +120,6 @@ def correct_keypoints(source_points, warped_points, L_pck, alpha=0.1):
     return pck
 
 
-
-def colorize_label(label_map, normalize=True, by_hue=True, exclude_zero=False, outline=False):
-
-    label_map = label_map.astype(np.uint8)
-
-    if by_hue:
-        import matplotlib.colors
-        sz = np.max(label_map)
-        aranged = np.arange(sz) / sz
-        hsv_color = np.stack((aranged, np.ones_like(aranged), np.ones_like(aranged)), axis=-1)
-        rgb_color = matplotlib.colors.hsv_to_rgb(hsv_color)
-        rgb_color = np.concatenate([np.zeros((1, 3)), rgb_color], axis=0)
-
-        test = rgb_color[label_map]
-    else:
-        VOC_color = np.array([(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0), (0, 0, 128), (128, 0, 128),
-                              (0, 128, 128), (128, 128, 128), (64, 0, 0), (192, 0, 0), (64, 128, 0), (192, 128, 0),
-                              (64, 0, 128), (192, 0, 128), (64, 128, 128), (192, 128, 128), (0, 64, 0), (128, 64, 0),
-                              (0, 192, 0), (128, 192, 0), (0, 64, 128), (255, 255, 255)], np.float32)
-
-        if exclude_zero:
-            VOC_color = VOC_color[1:]
-        test = VOC_color[label_map]
-        if normalize:
-            test /= np.max(test)
-
-    if outline:
-        edge = np.greater(np.sum(np.abs(test[:-1, :-1] - test[1:, :-1]), axis=-1) + np.sum(np.abs(test[:-1, :-1] - test[:-1, 1:]), axis=-1), 0)
-        edge1 = np.pad(edge, ((0, 1), (0, 1)), mode='constant', constant_values=0)
-        edge2 = np.pad(edge, ((1, 0), (1, 0)), mode='constant', constant_values=0)
-        edge = np.repeat(np.expand_dims(np.maximum(edge1, edge2), -1), 3, axis=-1)
-
-        test = np.maximum(test, edge)
-    return test
-
-
 # Training
 best_pck = 0
 for ep in range(args.epochs):
@@ -172,28 +137,6 @@ for ep in range(args.epochs):
         GT_tgt_mask = batch['mask2'].to(device)
 
         output = net(src_image, tgt_image, GT_src_mask, GT_tgt_mask)
-        src_image = src_image.data.cpu().numpy()
-        tgt_image = tgt_image.data.cpu().numpy()
-        GT_src_mask = F.interpolate(GT_src_mask, scale_factor=16, mode='bilinear', align_corners=False)
-        GT_src_mask = GT_src_mask.data.cpu().numpy()
-        GT_tgt_mask = F.interpolate(GT_tgt_mask, scale_factor=16, mode='bilinear', align_corners=False)
-        GT_tgt_mask = GT_tgt_mask.data.cpu().numpy()
-
-
-
-        for key in output:
-            if (not key == "grid_T2S") or (not key == "grid_S2T"):
-                print(f"{key}: {output[key].size()}")
-                output[key] = F.interpolate(output[key], scale_factor=16, mode='bilinear', align_corners=False).data.cpu().numpy()
-            else:
-                del output[key]
-        GT_src_mask = GT_src_mask[0, 0, :]
-        print("GT_src_mask: ", GT_src_mask.shape)
-        GT_src_mask = colorize_label(GT_src_mask)
-        cv2.imwrite("GT_src_mask.png", GT_src_mask)
-        exit()
-
-
 
         optimizer.zero_grad()
         loss,L1,L2,L3 = criterion(output, GT_src_mask, GT_tgt_mask)
