@@ -1,14 +1,20 @@
 import torch
+import torch.nn as nn
 import torch.optim.lr_scheduler as lrs
 import torch.nn.functional as F
 import numpy as np
 import os
 import random
+from torchvision.utils import save_image
+
 from custom_dataset import Pascal_Seg_Synth, PF_Pascal
 from custom_loss import loss_function
 from model import SFNet
 #import matplotlib.pyplot as plt
 import argparse
+from sys import exit
+
+name = 'test'
 
 parser = argparse.ArgumentParser(description="SFNet")
 parser.add_argument('--seed', type=int, default=123, help='random seed')
@@ -17,7 +23,7 @@ parser.add_argument('--epochs', type=int, default=40, help='number of epochs for
 parser.add_argument('--lr', type=float, default=3e-5, help='learning rate')
 parser.add_argument('--gamma', type=float, default=0.2, help='decaying factor')
 parser.add_argument('--decay_schedule', type=str, default='30', help='learning rate decaying schedule')
-parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loader')
+parser.add_argument('--num_workers', type=int, default=8, help='number of workers for data loader')
 parser.add_argument('--feature_h', type=int, default=20, help='height of feature volume')
 parser.add_argument('--feature_w', type=int, default=20, help='width of feature volume')
 parser.add_argument('--train_image_path', type=str, default='./data/VOC2012_seg_img.npy', help='directory of pre-processed(.npy) images')
@@ -30,9 +36,11 @@ parser.add_argument('--lambda1', type=float, default=3, help='weight parameter o
 parser.add_argument('--lambda2', type=float, default=16, help='weight parameter of flow consistency loss')
 parser.add_argument('--lambda3', type=float, default=0.5, help='weight parameter of smoothness loss')
 parser.add_argument('--eval_type', type=str, default='bounding_box', choices=('bounding_box','image_size'), help='evaluation type for PCK threshold (bounding box | image size)')
+
+parser.add_argument('--result_dir', type=str, default=f'./results/{name}')
 args = parser.parse_args()
 
-# os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 # Set seed
 global global_seed
@@ -57,13 +65,12 @@ def log(text, LOGGER_FILE):
         f.write(text)
         f.close()
 
-LOGGER_FILE = './training_log.txt'
+LOGGER_FILE = f'./{args.result_dir}/training_log.txt'
 
 if os.path.exists(LOGGER_FILE):
     os.remove(LOGGER_FILE)
 
-if not os.path.exists("./weights/"):
-    os.mkdir("./weights/")
+os.makedirs(f"./{args.result_dir}/weights/", exist_ok=True)
 
 
 # Data Loader
@@ -82,8 +89,10 @@ valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
 
 # Instantiate model
 net = SFNet(args.feature_h, args.feature_w, beta=args.beta, kernel_sigma = args.kernel_sigma)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net.to(device)
+# net = nn.DataParallel(net)
 
 # Instantiate loss
 criterion = loss_function(args).to(device)
@@ -107,6 +116,43 @@ def correct_keypoints(source_points, warped_points, L_pck, alpha=0.1):
     pck = torch.mean(correct_points.float())
     return pck
 
+
+
+def colorize_label(label_map, normalize=True, by_hue=True, exclude_zero=False, outline=False):
+
+    label_map = label_map.astype(np.uint8)
+
+    if by_hue:
+        import matplotlib.colors
+        sz = np.max(label_map)
+        aranged = np.arange(sz) / sz
+        hsv_color = np.stack((aranged, np.ones_like(aranged), np.ones_like(aranged)), axis=-1)
+        rgb_color = matplotlib.colors.hsv_to_rgb(hsv_color)
+        rgb_color = np.concatenate([np.zeros((1, 3)), rgb_color], axis=0)
+
+        test = rgb_color[label_map]
+    else:
+        VOC_color = np.array([(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0), (0, 0, 128), (128, 0, 128),
+                              (0, 128, 128), (128, 128, 128), (64, 0, 0), (192, 0, 0), (64, 128, 0), (192, 128, 0),
+                              (64, 0, 128), (192, 0, 128), (64, 128, 128), (192, 128, 128), (0, 64, 0), (128, 64, 0),
+                              (0, 192, 0), (128, 192, 0), (0, 64, 128), (255, 255, 255)], np.float32)
+
+        if exclude_zero:
+            VOC_color = VOC_color[1:]
+        test = VOC_color[label_map]
+        if normalize:
+            test /= np.max(test)
+
+    if outline:
+        edge = np.greater(np.sum(np.abs(test[:-1, :-1] - test[1:, :-1]), axis=-1) + np.sum(np.abs(test[:-1, :-1] - test[:-1, 1:]), axis=-1), 0)
+        edge1 = np.pad(edge, ((0, 1), (0, 1)), mode='constant', constant_values=0)
+        edge2 = np.pad(edge, ((1, 0), (1, 0)), mode='constant', constant_values=0)
+        edge = np.repeat(np.expand_dims(np.maximum(edge1, edge2), -1), 3, axis=-1)
+
+        test = np.maximum(test, edge)
+    return test
+
+
 # Training
 best_pck = 0
 for ep in range(args.epochs):
@@ -124,14 +170,36 @@ for ep in range(args.epochs):
         GT_tgt_mask = batch['mask2'].to(device)
 
         output = net(src_image, tgt_image, GT_src_mask, GT_tgt_mask)
+        src_image = src_image.data.cpu().numpy()
+        tgt_image = tgt_image.data.cpu().numpy()
+        GT_src_mask = F.interpolate(GT_src_mask, scale_factor=16, mode='bilinear', align_corners=False)
+        GT_src_mask = GT_src_mask.data.cpu().numpy()
+        GT_tgt_mask = F.interpolate(GT_tgt_mask, scale_factor=16, mode='bilinear', align_corners=False)
+        GT_tgt_mask = GT_tgt_mask.data.cpu().numpy()
+
+
+
+        for key in output:
+            if (not key == "grid_T2S") or (not key == "grid_S2T"):
+                print(f"{key}: {output[key].size()}")
+                output[key] = F.interpolate(output[key], scale_factor=16, mode='bilinear', align_corners=False).data.cpu().numpy()
+            else:
+                del output[key]
+        
+        GT_src_mask = colorize_label(GT_src_mask)
+        exit()
+
+
 
         optimizer.zero_grad()
         loss,L1,L2,L3 = criterion(output, GT_src_mask, GT_tgt_mask)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
-        log("Epoch %03d (%04d/%04d) = Loss : %5f (Now : %5f)\t" % (ep, i, len(train_dataset) // args.batch_size, total_loss / (i+1), loss.cpu().data), LOGGER_FILE)
-        log("L1 : %5f, L2 : %5f, L3 : %5f\n" % (L1.item(), L2.item(), L3.item()), LOGGER_FILE)
+
+        if i % 20 == 0:
+            log("Epoch %03d (%04d/%04d) = Loss : %5f (Now : %5f)\t" % (ep, i, len(train_dataset) // args.batch_size, total_loss / (i+1), loss.cpu().data), LOGGER_FILE)
+            log("L1 : %5f, L2 : %5f, L3 : %5f\n" % (L1.item(), L2.item(), L3.item()), LOGGER_FILE)
     log("Epoch %03d finished... Average loss : %5f\n"%(ep,total_loss/len(train_loader)), LOGGER_FILE)
 
     with torch.no_grad():
@@ -181,10 +249,12 @@ for ep in range(args.epochs):
         PCK = total_correct_points / len(valid_dataset)
         log('PCK: %5f\n\n' % PCK, LOGGER_FILE)
         if PCK > best_pck:
+            log('Update the best_checkpint', LOGGER_FILE)
             best_pck = PCK
-            if os.path.exists('./weights/best_checkpoint.pt'):
-                os.remove('./weights/best_checkpoint.pt')
+            if os.path.exists(f'./{args.result_dir}/weights/best_checkpoint.pt'):
+                os.remove(f'./{args.result_dir}/weights/best_checkpoint.pt')
             torch.save({'state_dict1' : net.adap_layer_feat3.state_dict(), 
                         'state_dict2' : net.adap_layer_feat4.state_dict()},
-                        './weights/best_checkpoint.pt')
+                        f'./{args.result_dir}/weights/best_checkpoint.pt')
                 
+    print(f"Epoch: [{ep}/{args.epochs}], PCK: {PCK:.4f}")
