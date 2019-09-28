@@ -4,6 +4,8 @@ import torch.optim.lr_scheduler as lrs
 import torch.nn.functional as F
 import numpy as np
 import os
+import cv2
+from PIL import Image
 import random
 from torchvision.utils import save_image
 
@@ -185,8 +187,10 @@ for ep in range(args.epochs):
                 output[key] = F.interpolate(output[key], scale_factor=16, mode='bilinear', align_corners=False).data.cpu().numpy()
             else:
                 del output[key]
-        
+        GT_src_mask = GT_src_mask[0, 0, :]
+        print("GT_src_mask: ", GT_src_mask.shape)
         GT_src_mask = colorize_label(GT_src_mask)
+        cv2.imwrite("GT_src_mask.png", GT_src_mask)
         exit()
 
 
